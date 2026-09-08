@@ -11,6 +11,7 @@ the dump, and decodes the VER_ValidStruct_s flash header of both.
 import argparse
 import bisect
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -66,6 +67,28 @@ def print_headers(a, b, name_a, name_b):
     for (k, va), (_, vb) in zip(fa, fb):
         mark = "   " if va == vb else "  <"
         print("  %-16s %-*s  %s%s" % (k, w, va, vb, mark))
+
+
+GIT_RE = re.compile(rb"[0-9a-f]{40}|NOVALIDCOMMIT|NOREMOTE")
+URL_RE = re.compile(rb"[ -~]{8,120}")
+
+
+def git_strings(img, label):
+    """The build compiles repo_url/commit_id into .rodata as plain char arrays
+    (wscript gitinfo_cfg.c), so they are literally present in the image."""
+    print("  %s:" % label)
+    hits = GIT_RE.findall(img)
+    for h in sorted(set(hits)):
+        print("    commit  %s" % h.decode())
+    urls = set()
+    for m in URL_RE.finditer(img):
+        t = m.group()
+        if b"://" in t or b"git@" in t or b".git" in t:
+            urls.add(t.strip())
+    for u in sorted(urls)[:8]:
+        print("    remote  %s" % u.decode("ascii", "replace"))
+    if not hits and not urls:
+        print("    (none found)")
 
 
 def build_image(flash_bin, header_bin):
@@ -140,8 +163,12 @@ def main():
     ap.add_argument("--elf", help="foxbms_primary.elf, to name the differing regions")
     ap.add_argument("--nm", default="arm-none-eabi-nm")
     ap.add_argument("--header-only", action="store_true")
+    ap.add_argument("--git", action="store_true",
+                    help="extract the embedded repo URL / commit id from both images")
     ap.add_argument("--gap", type=int, default=32, help="merge runs closer than this")
     ap.add_argument("--max-runs", type=int, default=40)
+    ap.add_argument("--sort", choices=["addr", "size"], default="addr",
+                    help="'size' lists the biggest changed regions first")
     a = ap.parse_args()
 
     with open(a.dump, "rb") as f:
@@ -153,6 +180,9 @@ def main():
     if a.header_only or not (a.build or (a.flash and a.header)):
         print("\nFlash header on the device:")
         print_headers(dump[HEADER_OFF:HEADER_OFF + 256], None, "device", None)
+        if a.git:
+            print("\nEmbedded git info:")
+            git_strings(dump, "device")
         return 0
 
     flash = a.flash or os.path.join(a.build, "foxbms_primary_flash.bin")
@@ -162,6 +192,11 @@ def main():
 
     print("\nFlash headers:")
     print_headers(dump[HEADER_OFF:HEADER_OFF + 256], built[HEADER_OFF:], "device", "local build")
+
+    if a.git:
+        print("\nEmbedded git info:")
+        git_strings(dump, "device")
+        git_strings(built, "local build")
 
     runs = diff_runs(dump, built, a.gap)
     total = sum(e - s for s, e in runs)
@@ -176,8 +211,10 @@ def main():
     if a.elf:
         starts, syms = load_symbols(a.elf, a.nm)
 
+    shown = sorted(app_runs, key=lambda r: r[1] - r[0], reverse=True) \
+        if a.sort == "size" else app_runs
     print("\n  address     size   symbol")
-    for s, e in app_runs[:a.max_runs]:
+    for s, e in shown[:a.max_runs]:
         name = symbol_at(starts, syms, FLASH_BASE + s) if syms else None
         print("  0x%08X  %6d  %s" % (FLASH_BASE + s, e - s, name or ""))
     if len(app_runs) > a.max_runs:
