@@ -1,0 +1,1 @@
+python -c "d=open(r'asdf.bin','rb').read(); print('size', len(d)); print('vectors', d[:8].hex()); print('header', d[0xFFF00:0xFFF10].hex()); print('erased', d.count(255))"
