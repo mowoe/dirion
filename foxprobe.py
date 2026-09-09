@@ -28,25 +28,36 @@ def list_ports():
             p.device, vid, pid, p.serial_number, p.description, tag))
 
 
-def open_port(port):
+def open_port(port, parity=serial.PARITY_EVEN):
+    """Bootloader link is 8E1 (AN3155); the application UART is 8N1."""
     return serial.Serial(port=port, baudrate=115200, bytesize=8,
-                         parity=serial.PARITY_EVEN, stopbits=1,
+                         parity=parity, stopbits=1,
                          xonxoff=0, rtscts=0, dsrdtr=0, timeout=1)
 
 
-def listen(port, seconds=3):
-    """DTR low = normal boot. Anything arriving means the MCU runs and talks."""
-    with open_port(port) as s:
+def listen(port, seconds=15):
+    """DTR low = normal boot, so the application runs. With
+    BUILD_MODULE_ENABLE_COM=1 the firmware printfs a startup banner at 115200 8N1."""
+    with open_port(port, serial.PARITY_NONE) as s:
         s.dtr = False
         s.rts = True; time.sleep(0.5); s.rts = False
         print("Reset into APPLICATION mode, listening %ds..." % seconds)
         end = time.time() + seconds
         got = b""
         while time.time() < end:
-            got += s.read(64)
-        print("received %d bytes: %s" % (len(got), got[:64].hex()))
+            chunk = s.read(256)
+            if chunk:
+                sys.stdout.write(chunk.decode("ascii", "replace"))
+                sys.stdout.flush()
+                got += chunk
+        print("\n--- received %d bytes ---" % len(got))
         if not got:
-            print("-> silent (normal for foxBMS on this UART; check the LEDs instead)")
+            print("-> silent: dies before BOOT_Init/COM_StartupInfo, or this UART")
+            print("   is not routed to the FTDI. Check the LEDs too.")
+        elif got.count(b"System starting") > 1:
+            print("-> banner repeated: reset loop (watchdog?). Read the RCC CSR value.")
+        else:
+            print("-> reached COM_StartupInfo; it dies later than early init.")
 
 
 def probe(port, tries):
